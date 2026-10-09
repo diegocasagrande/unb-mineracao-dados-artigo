@@ -1,0 +1,521 @@
+%% Normalidade Contextual em APIs -- versão 10 (texto do autor; dados de 01/05 a 19/09/2026; histórico de 3 meses x 1 mês)
+%% Classe acmart (sigconf), compatível com Overleaf (pdfLaTeX, XeLaTeX ou LuaLaTeX).
+\documentclass[sigconf,nonacm]{acmart}
+
+\usepackage[brazilian]{babel}
+\usepackage{booktabs}
+\usepackage{amsmath}
+\usepackage{xspace}
+\usepackage{fancyvrb}
+
+\citestyle{acmauthoryear}
+\settopmatter{printacmref=false, printfolios=true}
+\renewcommand{\keywordsname}{Palavras-chave}
+\setlength{\emergencystretch}{1.5em}
+
+\newcommand{\Normal}{\textsc{Normal}\xspace}
+\newcommand{\Residual}{\textsc{Residual}\xspace}
+
+\begin{document}
+
+\title{Normalidade Contextual em APIs: Caracterização de Regimes a partir de Access Logs para Apoio à Análise de Incidentes}
+
+\author{Diego Paz Casagrande}
+\affiliation{%
+  \institution{Universidade de Brasília}
+  \city{Brasília}
+  \state{DF}
+  \country{Brasil}}
+
+\renewcommand{\shortauthors}{D. P. Casagrande}
+
+\begin{abstract}
+Quando um incidente é aberto, uma das primeiras perguntas do operador é se as APIs envolvidas estão operando normalmente e, se não estão, qual indicador saiu do padrão. A resposta não é trivial, porque o comportamento de uma API varia legitimamente com o horário, o calendário e os processamentos em lote, e muda ao longo dos meses. Este trabalho investiga se API Access Logs (AALs) agregados por minuto permitem responder, no instante do registro do incidente, se cada recurso de API está em um de seus regimes normais (Normal) ou fora deles (Residual); qual indicador é responsável: erros de negócio (4xx), erros de sistema (5xx) ou latência; e desde quando. Seguindo o CRISP-DM, propõe-se um perfil de normalidade contextual por recurso, com um limite próprio para cada indicador calibrado por validação cruzada, e uma expansão retroativa em faixas de 15min a 4h para estimar o início do desvio. Em 5,6 milhões de registros de 12 recursos de produção no período de maio a setembro de 2026, testes estatísticos confirmaram regimes ligados à hora do dia. Em 12.157 consultas simuladas em agosto e setembro, a decisão sobre os 15 minutos anteriores ao registro teve especificidade de 97,1\% e apontou o indicador correto em 96,5\% dos casos detectados; o início real ficou dentro da zona estimada em 91,7\% deles. A sensibilidade foi de 39\%: alta para erros de sistema (até 88\%), baixa para erros de negócio e, para latência, de 36\% a 61\% nas degradações de 4 e 10 vezes. Um histórico de 1 mês superou o de 3 meses, indicando que o comportamento das APIs muda ao longo do tempo e que o retreino frequente é preferível a um histórico longo.
+\end{abstract}
+
+\keywords{Mineração de Dados; API Access Log; Normalidade Contextual; Análise de Incidentes; CRISP-DM; Regimes Operacionais.}
+
+\maketitle
+
+%% =====================================================================
+\section{Introdução}
+
+A arquitetura dos sistemas modernos consolidou o uso de APIs (\emph{Application Programming Interfaces}) como mecanismo fundamental de integração em sistemas distribuídos. Em ambientes corporativos de grande porte, as APIs medeiam desde requisições de clientes externos até transações entre sistemas legados e modernos. No Banco do Brasil, cerca de 30 mil APIs são executadas diariamente, conectando soluções de negócio que combinam plataformas em nuvem e \emph{mainframe}.
+
+\subsection{Contexto}
+
+Requisições processadas por gateways de API geram registros com o instante da execução, o recurso acessado, o código de resposta, o tempo de processamento e o consumidor. Neste estudo, esses registros são denominados \emph{API Access Logs} (AALs), o registro gerado pelo gateway para as requisições processadas, distinto do \emph{execution log} e do log de aplicação. Os AALs estão disponíveis de forma padronizada para um conjunto amplo de APIs, sem instrumentação específica no código. Uma API expõe um ou mais recursos, também chamados de \emph{endpoints}, que são a unidade executável e a unidade de análise deste trabalho; os termos são tratados aqui como sinônimos, e adota-se \emph{recurso}.
+
+O comportamento operacional de uma API não é necessariamente estacionário. Volume, latência e proporção de erros variam com o horário, o dia da semana, os processamentos em lote e as janelas de manutenção. Uma taxa de erros elevada pode ser normal na virada do dia, assim como latência maior pode indicar degradação ou apenas um aumento esperado de volume de requisições; uma queda abrupta de tráfego pode indicar indisponibilidade ou o fim de um período de atendimento.
+
+\subsection{Problema}
+Quando um incidente é registrado, o operador precisa contextualizar semanticamente a situação e responder, para cada API envolvida: \emph{o período anterior ao registro estava dentro do comportamento normal esperado para aquele momento?} Se não estava, também importa saber quais métricas desviaram, como: erros de negócio (faixa 4xx), erros de sistema (faixa 5xx) ou latência; e desde quando o desvio acontece. Como informação complementar, interessa saber se o impacto é generalizado, ou concentrado em uma aplicação cliente específica com volume suficiente para alterar o estado da API. Um erro espalhado entre todos os consumidores sugere um problema no provedor.
+
+Hoje essa resposta depende de consultar várias ferramentas e de conhecer o comportamento típico de cada API e recurso~\citep{zhang2025isre}. Abordagens com limites fixos ou com um único perfil de normalidade não distinguem a variação legítima, como um lote à meia-noite ou o volume menor no domingo, de um desvio real.
+
+Do ponto de vista de mineração de dados, o problema consiste em: (1) caracterizar os regimes normais de cada recurso a partir de AALs agregados em janelas; (2) classificar o período imediatamente anterior ao registro de um incidente em dois estados: \Normal (dentro de algum regime normal esperado para aquele contexto) ou \Residual (todo o resto); e (3) quando \Residual, identificar qual parâmetro desviou, sendo este o indicador responsável, e desde quando o desvio acontece.
+
+
+\subsection{Motivação}
+Este trabalho complementa um projeto de mestrado sobre sistemas multiagente para apoio ao atendimento de incidentes. A literatura recente mostra agentes especializados em diferentes fontes de dados, coordenados para triagem e análise~\citep{yu2025triangle,luo2025opsagent,zhang2025isre}. Um desses agentes precisa de uma fonte confiável e explicável sobre o comportamento das APIs. O foco não é monitoração em tempo real nem a identificação da causa raiz, mas a \emph{informação de contexto no instante do incidente}: dizer se cada recurso está em regime normal e, se não, qual indicador está impactado e desde quando. Essa informação abastece o operador por meio de um agente especialista e colabora para a análise do ocorrido, entregando um contexto semântico embasado em mineração de dados. A hipótese de projeto é que uma evidência pré-processada e estruturada reduza a quantidade de dados brutos que o agente precisa percorrer, economizando recursos computacionais e evitando alucinações; o presente trabalho avalia a qualidade dessa evidência, e não o desempenho do agente que a consome.
+
+\subsection{Objetivos}
+\textbf{Objetivo geral:} caracterizar os regimes normais de cada recurso da API a partir de Access Logs agregados por minuto e no instante do registro de um incidente, informar se o recurso está em regime \Normal e, se não, qual indicador foi impactado e desde quando.
+
+\textbf{Objetivos específicos:}
+\begin{itemize}
+  \item Verificar se cada recurso apresenta vários regimes normais ligados ao contexto (hora e tipo de dia).
+  \item Construir um perfil de normalidade por recurso e contexto e uma regra de decisão \Normal ou \Residual explicável.
+  \item Identificar o indicador responsável (4xx, 5xx, latência) e estimar o início do desvio.
+  \item Avaliar o método em cenários de incidente simulados em dois meses e compará-lo a baselines simples.
+  \item Avaliar quanto histórico o perfil precisa (3 meses ou 1 mês).
+  \item Disponibilizar a informação em formato estruturado para um agente ou operador.
+\end{itemize}
+
+\subsection{Questões de pesquisa}
+\begin{itemize}
+  \item \textbf{RQ1.} AALs agregados permitem caracterizar os regimes normais de cada recurso e decidir, no instante do registro, se o recurso está em regime \Normal?
+  \item \textbf{RQ2.} Quando o recurso não está em regime \Normal, o método identifica corretamente o indicador responsável (4xx, 5xx, latência) e o início do desvio?
+  \item \textbf{RQ3.} Qual o período anterior ao registro (15, 30 ou 60~min) mais adequado para a decisão, e como o intervalo entre o início da degradação e o registro afeta o resultado?
+  \item \textbf{RQ4.} Um histórico mais longo (3 meses) produz um perfil melhor do que o histórico recente (1 mês)?
+\end{itemize}
+
+\subsection{Contribuições e organização}
+As contribuições são: (i) a caracterização rastreável dos regimes de 12 recursos de API de produção ao longo de cinco meses; (ii) um método simples e explicável, sem rótulos, que decide o estado de um recurso no instante do registro e aponta o indicador impactado; (iii) uma estimativa de início por expansão retroativa; (iv) um protocolo de avaliação com cenários de incidente simulados em dois meses; e (v) evidência de que, nesses dados, o histórico recente é mais útil que o longo. A Seção~\ref{sec:correlatos} discute os trabalhos correlatos; a Seção~\ref{sec:metodologia}, a metodologia; a Seção~\ref{sec:resultados}, os resultados; a Seção~\ref{sec:discussao}, a discussão; a Seção~\ref{sec:ameacas}, as ameaças à validade; e a Seção~\ref{sec:conclusao} conclui.
+
+%% =====================================================================
+\section{Trabalhos correlatos}\label{sec:correlatos}
+
+A literatura relacionada é organizada em quatro frentes e avaliada segundo quatro critérios que decorrem do problema tratado aqui: (i) a fonte de dados exigida; (ii) o tratamento dado à normalidade, isto é, se o comportamento esperado é único ou condicionado ao contexto; (iii) o tipo de saída produzida, escore ou explicação; e (iv) a necessidade de rótulos ou de instrumentação adicional. A Tabela~\ref{tab:correlatos} resume a comparação.
+
+\begin{table*}[t]
+  \caption{Comparação com os trabalhos correlatos segundo os quatro critérios.}
+  \label{tab:correlatos}
+  \small
+  \begin{tabular}{p{0.17\textwidth}p{0.19\textwidth}p{0.17\textwidth}p{0.2\textwidth}p{0.18\textwidth}}
+    \toprule
+    Trabalho & Fonte de dados & Normalidade & Saída & Rótulos ou instrumentação \\
+    \midrule
+    DeepLog, LogAnomaly & sequências de log de sistema & única & escore ou rótulo binário & log de aplicação com \emph{templates} \\
+    SPOT/DSPOT & série temporal univariada & adaptada ao longo do tempo & limiar e alarme & --- \\
+    USAD & séries multivariadas & única & escore & período de treino limpo \\
+    \citet{wang2025crosssystem} & \emph{traces} & única por sistema & categoria da anomalia & \emph{traces}; exemplos rotulados \\
+    DeepTraLog, GAMMA & \emph{traces}, logs e métricas & única & escore ou localização & instrumentação distribuída \\
+    Triangle, OpsAgent, ISRE & múltiplas fontes do incidente & não modelada (consome evidências) & triagem ou diagnóstico & integração com as fontes \\
+    \midrule
+    \textbf{Este trabalho} & AAL agregado por minuto & família de regimes por contexto & estado, indicador e início, com explicação & nenhum além do AAL; sem rótulos \\
+    \bottomrule
+  \end{tabular}
+\end{table*}
+
+\subsection{Análise e mineração de logs}
+\citet{du2017deeplog} propuseram o DeepLog, que modela sequências de eventos de log com redes LSTM e sinaliza como anômala toda sequência pouco provável sob o modelo aprendido. \citet{meng2019loganomaly} estenderam essa linha com o LogAnomaly, combinando a informação semântica dos \emph{templates} com a detecção de anomalias sequenciais e quantitativas. Ambos sustentam a premissa que também adotamos: logs carregam informação suficiente para caracterizar comportamento, sem instrumentação dedicada.
+
+As diferenças, porém, são decisivas para o problema aqui tratado. Primeiro, a unidade de análise é a sequência de eventos de log de sistema, que pressupõe \emph{templates} estáveis e acesso ao log de aplicação; o AAL é um agregado por minuto, sem ordem de eventos e sem texto a partir do qual extrair \emph{templates}. Segundo, e mais importante, a normalidade nesses modelos é única: aprende-se uma distribuição de sequências normais, e o que foge dela é anômalo. Um lote à meia-noite ou uma janela de manutenção produzem padrões legítimos que um modelo sem contexto tende a tratar como desvio, a menos que o horário entre implicitamente como atributo, o que os trabalhos não exploram. Terceiro, a saída é um escore ou um rótulo binário. Para o operador que acaba de abrir um incidente, saber que a sequência é improvável não responde qual indicador saiu do padrão nem desde quando.
+
+\subsection{Normalidade e séries temporais}
+\citet{siffer2017spot} propuseram o SPOT e sua variante com \emph{drift}, o DSPOT, que calibram limiares a partir da cauda da distribuição usando Teoria de Valores Extremos, com adaptação a séries não estacionárias. É o trabalho mais próximo do nosso em espírito: ambos reconhecem que o limiar não pode ser fixo e o derivam da própria distribuição observada, sem rótulos. O DSPOT adapta o limiar \emph{ao longo do tempo}, seguindo a série; o perfil contextual a trata como função de variáveis conhecidas \emph{a priori}, hora e tipo de dia. A consequência prática é que a adaptação temporal absorve uma degradação lenta como se fosse o novo normal, ao passo que o condicionamento por contexto preserva a referência do mesmo horário em dias anteriores. Em compensação, o DSPOT não exige que os contextos relevantes sejam conhecidos de antemão, o que é uma vantagem em domínios onde a sazonalidade não é óbvia.
+
+\citet{audibert2020usad} propuseram o USAD, baseado em autoencoders para séries multivariadas. O método é mais expressivo que o nosso e captura dependências entre indicadores. Há ainda a questão do treinamento, que pressupõe um período limpo de anomalias; em dados de produção sem histórico de incidentes rotulado, como os nossos, essa suposição não é verificável.
+
+\citet{wang2025crosssystem} documentam a dificuldade de transferir modelos de detecção entre sistemas distintos, mesmo com meta-aprendizado. O achado é relevante como justificativa negativa para nossa escolha de ajustar um perfil por recurso se a transferência entre sistemas é difícil, a transferência entre recursos de perfis de tráfego muito diferentes nos nossos dados dificilmente seria mais fácil. A contrapartida é que perfis por recurso não generalizam para recursos novos, que precisam acumular histórico antes de serem avaliados; nossos resultados em setembro, com recursos de histórico curto, mostram esse custo.
+
+
+\subsection{Modelagem comportamental de microsserviços}
+O DeepTraLog~\citep{zhang2022deeptralog} combina \emph{traces} e logs em um grafo de eventos e aprende, com redes neurais em grafos, a estrutura esperada de uma requisição; o GAMMA~\citep{somashekar2024gamma} localiza gargalos de desempenho explorando a topologia de dependências entre serviços. Ambos entregam algo que o presente trabalho não entrega: localização, isto é, a indicação de \emph{onde} na cadeia de chamadas o problema se manifesta.
+
+Esse ganho tem um pré-requisito. Ambos pressupõem \emph{traces} distribuídos ou métricas de infraestrutura correlacionadas, que exigem instrumentação consistente em todos os serviços da cadeia. Em ambientes corporativos heterogêneos, que combinam plataformas em nuvem e sistemas legados, essa cobertura é desigual. O AAL tem a propriedade oposta: é pobre em estrutura, porque não enxerga além do \emph{gateway}, mas é uniformemente disponível. Os dois enfoques são, portanto, complementares, e não concorrentes.
+
+
+\subsection{Incidentes e sistemas multiagente}
+O Triangle~\citep{yu2025triangle} organiza múltiplos agentes para a triagem de incidentes; o OpsAgent~\citep{luo2025opsagent} e o trabalho de \citet{zhang2025isre} coordenam agentes especializados em diferentes fontes para análise de incidentes e determinação de causa raiz. Esses sistemas deslocam o problema. O desafio deixa de ser o algoritmo de detecção e passa a ser a qualidade e a legibilidade das evidências que cada agente consome.
+
+É nesse ponto que a avaliação desses trabalhos deixa uma questão em aberto. A competência do sistema multiagente é medida de ponta a ponta (acurácia de triagem, acerto de causa raiz), sem que se isole a contribuição de cada fonte nem se caracterize seu regime de erro. 
+
+\subsection{Síntese e lacuna}
+A comparação revela um padrão: os trabalhos que dispensam rótulos tratam a normalidade como única ou como algo que se adapta ao longo do tempo, mas não como uma família de regimes legítimos coexistentes; os que modelam comportamento com riqueza suficiente para distinguir situações dependem de fontes além do AAL; e os que produzem explicações acionáveis o fazem no nível do sistema de agentes, assumindo como dadas as evidências que recebem. Nenhum deles investiga, exclusivamente a partir do AAL, se um mesmo recurso apresenta vários regimes normais e se essa caracterização pode informar, no instante do registro de um incidente, o estado do recurso, o indicador impactado e o início do desvio.
+
+%% =====================================================================
+\section{Metodologia}\label{sec:metodologia}
+
+O trabalho segue o CRISP-DM~\citep{chapman2000crispdm,wirth2000crispdm}. Cada fase foi implementada em um \emph{notebook} Jupyter com parâmetros explícitos e sementes fixas para todos os sorteios, de modo que os cenários e os agrupamentos sejam reprodutíveis (Tabela~\ref{tab:fases}). A análise é sempre por recurso. Optou-se por técnicas de fácil explicação, todas disponíveis em bibliotecas Python de uso corrente, como pandas, SciPy e scikit-learn~\citep{pedregosa2011sklearn}.
+
+
+\begin{table}[t]
+  \caption{Fases do CRISP-DM, notebooks e técnicas. As fases se repetem porque
+  o processo é iterativo; a ordem segue a dos notebooks.}
+  \label{tab:fases}
+  \small
+  \begin{tabular}{p{0.2\columnwidth}p{0.7\columnwidth}}
+    \toprule
+    Fase & Notebook: conteúdo (técnica) \\
+    \midrule
+    Negócio, Dados & 01: problema, critérios de sucesso, qualidade e evolução mensal da base \\
+    Preparação & 02: consolidação, atributos por janela, p95 de latência (percentil) \\
+    Dados, Modelagem & 03: regimes (Kruskal-Wallis com Bonferroni; k-means com silhouette) \\
+    Modelagem & 04: perfil contextual (mediana/MAD); limite por indicador (percentil, validação cruzada), por mês de teste e histórico \\
+    Preparação & 05: cenários de incidente (injeção de falhas) \\
+    Avaliação & 06: estado, indicador, início (expansão retroativa); histórico; IC de Wilson, McNemar \\
+    Implantação & 07: consulta estruturada para o agente \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\subsection{Entendimento do negócio}
+A decisão apoiada é: \emph{no instante do registro do incidente, o recurso está em regime normal? Se não, qual indicador foi impactado (erros 4xx, erros 5xx, latência) e desde quando?} A abrangência (consumidor específico ou generalizado) é informação complementar. Os critérios de sucesso foram definidos antes da modelagem (Tabela~\ref{tab:criterios}). Como não havia histórico de incidentes, a avaliação usa cenários simulados com falhas injetadas.
+
+\subsection{Entendimento dos dados}
+A base contém AALs de produção de 12 recursos de APIs distintas, identificados aqui por E01 a E12 (em ordem decrescente de volume em agosto). Cada registro é um agregado por minuto de data hora da execução, recurso, código de resposta HTTP (Status-code) e cliente com o total de execuções no minuto e o tempo médio dessas execuções. Como a agregação temporal por minuto já está disponível neste formato, optou-se por não utilizar os registros por execução, o que não inviabiliza a utilização do registro bruto para fazer essa agregação e utilizar como entrada para este processo. O identificador de cliente foi anonimizado por SHA-256 com semente, sem payloads nem dados pessoais. Os horários, em UTC, foram convertidos para o horário de Brasília (UTC-3) antes de qualquer corte temporal.
+
+São 5.602.126 registros de 01/05/2026 0h a 19/09/2026 23h59 (horário de Brasília), com 1.976 clientes distintos. As respostas de sucesso (código de resposta HTTP = 2xx) somam 87,6\% das transações; de erros negociais (código de resposta HTTP = 4xx), 12,2\%; e erros de sistema (código de respostas HTTP = 5xx), 0,21\%. A cobertura varia: sete recursos têm dados desde maio; o E04, desde 25/05; cinco (E02, E03, E06, E10, E11), apenas desde 16/07; e quatro (E02, E03, E06, E11) param em 03/09. O volume de execuções por 15 min vai de 47 transações (E11) a 2.239 (E02). Esses números mostram a heterogeneidade da base entre os recursos. 
+
+\paragraph{Evolução mensal.} O comportamento muda ao longo dos meses. Entre maio e setembro, o volume médio diário cresce de 35\% a 60\% em vários recursos (E07, E08, E12), e a taxa de erros de negócio muda de patamar: no E02, passa de 32\% (julho) para 45\% (agosto) e 62\% (setembro); no E04, de 0,5\% (maio) para 13\% (agosto). Essa mudança motiva a questão RQ4.
+
+\subsection{Preparação dos dados}
+As chaves repetidas foram consolidadas (soma do volume e média de latência ponderada). Os registros foram agregados em janelas de 1~h (29.509 janelas recurso $\times$ hora), que formam a base do perfil de normalidade. A decisão usa quatro indicadores (Tabela~\ref{tab:atributos}). O \emph{contexto} de cada janela é o par (tipo de dia, hora), com tipo de dia \emph{útil} ou \emph{não útil} (sábado, domingo e feriados).
+
+\paragraph{Latência p95.} Como não há latência por requisição, o p95 é o percentil 95 das latências médias por minuto $\times$ cliente das respostas 2xx, ponderado pelo número de execuções. É um p95 \emph{das médias}, não das requisições, e tende a subestimar a cauda real; mas é consistente entre períodos e sensível a degradações que atingem só parte dos minutos ou dos consumidores. Na mediana, ele é 1,42 vez a latência média.
+
+
+\begin{table}[t]
+  \caption{Indicadores usados na decisão e direção desfavorável.}
+  \label{tab:atributos}
+  \small
+  \begin{tabular}{p{0.2\columnwidth}p{0.52\columnwidth}p{0.16\columnwidth}}
+    \toprule
+    Indicador & Definição & Direção \\
+    \midrule
+    volume & $\log(1+$transações$)$, na escala horária & alta e queda \\
+    erros 4xx & transações 4xx / total (erros de negócio) & alta \\
+    erros 5xx & transações 5xx / total (erros de sistema) & alta \\
+    latência p95 & $\log(1+$p95 das médias por minuto$\times$cliente$)$ & alta \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\subsection{Modelagem}
+
+\paragraph{Regimes (descritivo).} O teste de Kruskal-Wallis~\citep{kruskal1952ranks}, com correção de Bonferroni~\citep{dunn1961multiple}, verifica se cada indicador muda entre as 24 horas dos dias úteis. Para cada recurso, o k-means~\citep{lloyd1982kmeans} agrupa as janelas de 1~h de maio a agosto usando apenas os indicadores padronizados e limitados aos percentis 1 e 99 do recurso (em um período de quatro meses, picos isolados formariam grupos próprios com menos de 0,5\% das horas). O número de regimes, $k\in[2,8]$, é escolhido pelo coeficiente de silhouette~\citep{rousseeuw1987silhouette}. O contexto não entra no agrupamento, para que a relação regime--contexto seja uma descoberta, e não um insumo; ele é usado depois, para nomear cada regime (nível de volume, tipo de dia e horas em que predomina). O k-means é descritivo: a decisão usa o perfil contextual.
+
+\paragraph{Perfil de normalidade contextual.} Para cada recurso, contexto e indicador, o perfil guarda a mediana histórica e uma escala robusta de variação, calculadas nas janelas de uma hora do histórico. A escala é obtida a partir do desvio absoluto mediano (MAD), multiplicado por 1,4826 para ficar comparável ao desvio-padrão, e respeita um valor mínimo para evitar divisões por valores próximos de zero. Para cada período avaliado, o valor observado é comparado à mediana esperada para aquele recurso e contexto, e essa diferença é dividida pela escala robusta. O resultado indica quantas escalas de variação normal o indicador se afasta do esperado. Para o volume, tanto aumentos como quedas são considerados desfavoráveis; para erros 4xx, erros 5xx e latência, apenas aumentos contam como desvio. Períodos de 15 e 30 minutos usam o mesmo perfil de uma hora: o volume é convertido para a escala horária, e as taxas e o p95 são usados diretamente.
+
+\paragraph{Limite por indicador.} Os indicadores têm variabilidades muito diferentes; em alguns recursos a taxa de 4xx tem picos reais frequentes. Por isso, cada indicador tem um limite próprio no recurso, $L_{r,a}=\max\{3,\ Q_{0{,}99}(d_a)\}$: o percentil 99 dos seus desvios no histórico, calculados fora da amostra. O limite é recalculado para cada tamanho de período (15, 30 e 60~min), porque períodos curtos variam mais. O período é \Residual se algum indicador passa do seu limite ($d_a/L_{r,a}>1$); o \textbf{indicador responsável} é o que mais passou, em múltiplos do limite.
+
+\paragraph{Histórico e calibração sem vazamento.} Para cada mês de teste (agosto; 1 a 19 de setembro), o perfil e os limites são ajustados só com dados anteriores, em dois históricos: \emph{3 meses} (principal; maio a julho para agosto e junho a agosto para setembro) e \emph{1 mês} (o mês anterior). Os desvios fora da amostra vêm de validação cruzada com quatro blocos contíguos de tempo dentro do histórico: o perfil é ajustado em três blocos e avalia o restante. Com essa regra, cerca de 3\% dos períodos do histórico são \Residual.
+
+\paragraph{Consulta no registro e início estimado (expansão retroativa).} No instante $t$ do registro, o método olha para trás a partir de $t$ em faixas disjuntas cada vez mais distantes: 0--15, 15--30 e 30--60~min e, depois, de hora em hora até 4~h. A faixa mais recente, $[t-15\,\text{min}, t)$, define o \emph{estado no registro} e o indicador responsável. Se ela for \Residual, a busca continua para trás e para na primeira faixa \Normal; o início é estimado entre o começo da última faixa residual e o fim dessa faixa normal (``começou entre 30 e 120~min antes do registro''). Todas as faixas são comparadas ao mesmo perfil de 1~h: o volume é convertido para a escala horária, e as taxas e o p95 são usados diretamente. Como faixas curtas variam mais, cada tamanho de faixa recebe seus próprios limites, calibrados da mesma forma.
+
+\paragraph{Abrangência (complementar).} Para erros 4xx ou 5xx, o desvio é atribuído a um \emph{consumidor específico} quando o cliente com mais erros concentra ao menos 80\% deles e essa fatia supera em pelo menos 20 pontos percentuais a sua fatia do volume; caso contrário, é \emph{generalizado}. Recursos com menos de três clientes ativos ficam indeterminados.
+
+\subsection{Avaliação}
+
+\paragraph{Cenários de incidente.} Cada cenário simula um incidente: uma degradação começa em $t_0$ e o incidente é registrado em $t=t_0+\Delta$, com atraso $\Delta\in\{15,30,60,120\}$~min. O instante de registro é sorteado dentro do mês de teste. Entram no teste de um mês os recursos com ao menos 28 dias de dados no mês anterior: 7 recursos em agosto e os 12 em setembro. As falhas (Tabela~\ref{tab:falhas}) são aplicadas nos registros por minuto $\times$ cliente e depois reagregadas, para que os indicadores e a abrangência reajam como numa falha real. Foram gerados 5 cenários por recurso $\times$ mês $\times$ motivo $\times$ intensidade $\times$ atraso (6.080 incidentes, dos quais 3 caíram em intervalos sem nenhum tráfego no recurso, onde a falha não se manifesta, e foram excluídos) e 6.080 consultas de controle, em instantes sem falha injetada. 
+
+\begin{table}[t]
+  \caption{Motivos injetados.}
+  \label{tab:falhas}
+  \small
+  \begin{tabular}{p{0.26\columnwidth}p{0.64\columnwidth}}
+    \toprule
+    Motivo & Intensidade (baixa / média / alta / muito alta) \\
+    \midrule
+    4xx generalizado & 5\% / 15\% / 40\% das 2xx viram 400 \\
+    4xx de 1 consumidor & 30\% / 60\% / 90\% das 2xx do consumidor viram 400 \\
+    5xx generalizado & 5\% / 15\% / 40\% das 2xx viram 503 \\
+    5xx de 1 consumidor & 30\% / 60\% / 90\% das 2xx do consumidor viram 503 \\
+    Latência & tempo de execução $\times$1,5 / $\times$2,5 / $\times$4 / $\times$10 \\
+    \bottomrule
+  \end{tabular}
+  \par\smallskip\footnotesize O consumidor afetado é sorteado com probabilidade proporcional ao seu volume.
+\end{table}
+
+\paragraph{Latência $\times$10.} Como a latência vem de médias por minuto, poucas requisições lentas elevam muito o valor. No histórico de maio a agosto, o p95 horário ultrapassou 10 vezes a mediana do seu contexto em 0,78\% das horas (percentil 99,9: 25 vezes; máximo: 68 vezes). Degradações de latência relevantes para um incidente tendem a ser desse tamanho, por isso a intensidade ``muito alta'' ($\times$10) foi incluída para a latência. As intensidades menores foram mantidas para mostrar o limite do método.
+
+\paragraph{Métricas.} Para cada cenário, a consulta é feita no instante do registro, como descrito acima. As métricas são: \emph{sensibilidade} (incidentes com saída \Residual); \emph{especificidade} (controles com saída \Normal); \emph{acurácia do indicador} (indicador apontado igual ao do motivo injetado, entre os detectados); \emph{acerto do início} (início real dentro da zona estimada pela expansão retroativa); e \emph{acurácia da abrangência}. ``Média/alta'' refere-se às intensidades média e alta, sem a latência $\times$10, para comparação com versões anteriores do estudo. As proporções têm intervalos de confiança de Wilson a 95\%~\citep{wilson1927probable}.
+
+\paragraph{Baselines.} Os baselines avaliam se o perfil contextual agrega valor à decisão. O primeiro é o \emph{z-score global}, que usa a mesma lógica de mediana, MAD e limites por indicador, mas ignora hora e tipo de dia: cada recurso tem uma única referência histórica para cada indicador. O segundo é a \emph{semana anterior}, que compara o período avaliado com o mesmo intervalo de tempo sete dias antes, explorando a periodicidade semanal sem construir um perfil estatístico mais amplo. Os três métodos usam o mesmo tratamento de limites e calibração, para que a comparação isole o efeito da estratégia de referência.
+
+A comparação entre métodos usa o teste exato de McNemar~\citep{mcnemar1947note} sobre os acertos de estado nos mesmos cenários simulados. O teste considera apenas os casos em que os métodos divergem: aqueles em que o perfil contextual acerta e o baseline erra, e aqueles em que ocorre o contrário. Um valor $p$ pequeno indica evidência de diferença estatisticamente significativa entre os métodos. O mesmo teste compara os perfis ajustados com históricos de 3 meses e de 1 mês, pois ambos são aplicados aos mesmos cenários.
+
+\paragraph{Experimentos.} \textbf{Exp.~1} caracteriza os regimes de cada recurso (Kruskal-Wallis e k-means). \textbf{Exp.~2} avalia o estado no registro: sensibilidade, especificidade e comparação com os baselines. \textbf{Exp.~3} avalia a consulta quando o recurso é \Residual: indicador responsável, início estimado pela expansão retroativa e abrangência. \textbf{Exp.~4} compara os históricos de 3 meses e de 1 mês.
+
+%% =====================================================================
+\section{Resultados}\label{sec:resultados}
+
+\subsection{Exp.~1: regimes normais por recurso (RQ1)}
+
+A Figura~\ref{fig:perfis} mostra perfis horários típicos: lote na virada do dia e às 18h dos dias úteis (E01), lote às 15--16h (E05), padrão comercial em dias úteis que desaparece nos dias não úteis (E02, E12). O mapa de calor (Figura~\ref{fig:mapa}) confirma que cada recurso tem sua própria assinatura horária de volume e de latência. Nos dias úteis, 96\% dos testes de Kruskal-Wallis (recurso $\times$ indicador) foram significativos após Bonferroni. O efeito mediano ($\varepsilon^2$) foi grande para volume (0,40), erros 4xx (0,28) e latência p95 (0,25), e pequeno para erros 5xx (0,05), que em dias normais são raros.
+
+\begin{figure*}[t]
+  \centering
+  \includegraphics[width=0.9\textwidth]{figuras/fig_perfis_volume.pdf}
+  \caption{Volume mediano por hora e tipo de dia (maio a agosto), em quatro recursos.}
+  \label{fig:perfis}
+\end{figure*}
+
+\begin{figure*}[t]
+  \centering
+  \includegraphics[width=0.85\textwidth]{figuras/fig_mapa_calor.pdf}
+  \caption{Volume e latência p95 medianos por hora em dias úteis, normalizados pelo máximo de cada recurso.}
+  \label{fig:mapa}
+\end{figure*}
+
+O k-means encontrou de 2 a 8 regimes por recurso (mediana 3; silhouette médio 0,51; Tabela~\ref{tab:recursos}). A Figura~\ref{fig:regimes} ilustra o E02: um regime de volume alto das 8 às 19h dos dias úteis, um de volume médio no restante do tempo, um de volume baixo em dias não úteis, um regime esporádico de volume e latência altos e um regime à 0h com taxa de 5xx elevada. Esse último é \emph{normal} para aquele horário: é o tipo de variação legítima que um limite fixo trataria como falha.
+
+\begin{figure*}[t]
+  \centering
+  \includegraphics[width=0.85\textwidth]{figuras/fig_regimes_contexto.pdf}
+  \caption{Regime predominante (k-means com os indicadores) por tipo de dia e hora no recurso E02.}
+  \label{fig:regimes}
+\end{figure*}
+
+\begin{table*}[t]
+  \caption{Resumo por recurso: participação no volume, clientes, transações medianas por 15~min, regimes (Exp.~1), meses de teste e resultados no registro (Exp.~2 e 3; faixa de 15~min, histórico de 3 meses).}
+  \label{tab:recursos}
+  \small
+  \begin{tabular}{lrrrrrcrrrr}
+    \toprule
+    Recurso & Vol. (\%) & Clientes & Trans./15 min & Regimes ($k$) & Silhouette & Teste & Sensib. & Sensib. média/alta & Especif. & Acurácia indicador \\
+    \midrule
+    E01 & 47,2 & 38  & 1.212 & 3 & 0,36 & ago, set & 0,60 & 0,66 & 0,97 & 0,98 \\
+    E02 & 12,0 & 555 & 2.239 & 5 & 0,55 & set & 0,18 & 0,26 & 0,98 & 0,84 \\
+    E03 & 3,1  & 246 & 498   & 4 & 0,52 & set & 0,25 & 0,33 & 0,95 & 0,87 \\
+    E04 & 4,9  & 24  & 149   & 2 & 0,54 & ago, set & 0,36 & 0,40 & 0,96 & 0,94 \\
+    E05 & 6,0  & 19  & 113   & 2 & 0,78 & ago, set & 0,44 & 0,43 & 0,97 & 0,98 \\
+    E06 & 2,4  & 787 & 290   & 2 & 0,64 & set & 0,09 & 0,10 & 0,94 & 0,69 \\
+    E07 & 5,7  & 36  & 123   & 2 & 0,63 & ago, set & 0,42 & 0,42 & 0,98 & 0,97 \\
+    E08 & 5,9  & 39  & 279   & 5 & 0,35 & ago, set & 0,49 & 0,55 & 0,99 & 0,99 \\
+    E09 & 5,6  & 30  & 132   & 3 & 0,66 & ago, set & 0,63 & 0,70 & 0,97 & 0,99 \\
+    E10 & 2,2  & 2   & 260   & 8 & 0,29 & set & 0,06 & 0,06 & 1,00 & 1,00 \\
+    E11 & 2,0  & 625 & 47    & 3 & 0,55 & set & 0,20 & 0,22 & 0,99 & 0,97 \\
+    E12 & 2,9  & 831 & 174   & 4 & 0,29 & ago, set & 0,40 & 0,49 & 0,96 & 0,97 \\
+    \bottomrule
+  \end{tabular}
+\end{table*}
+
+\paragraph{Limites por indicador.} Os limites (Figura~\ref{fig:limites}) variam de 3 a 86 em $z$. Limites altos revelam indicadores com picos reais frequentes no histórico: erros 4xx em E04 (86), E05 (81) e E07 (56); erros 5xx em E10 e E12 (cerca de 20); e latência p95 em E02 (38) e E03 (23). Nesses casos, só desvios grandes daquele indicador são marcados como \Residual. No histórico de junho a agosto, fora da amostra, 3,3\% das janelas de 1~h foram residuais, com latência (201 janelas), volume (200), erros 4xx (191) e erros 5xx (101) como indicadores responsáveis.
+
+\begin{figure*}[t]
+  \centering
+  \includegraphics[width=0.85\textwidth]{figuras/fig_limites.pdf}
+  \caption{Limite de cada indicador por recurso ($z$, percentil 99 fora da amostra, mínimo 3), para períodos de 15 e de 60~min; histórico de junho a agosto.}
+  \label{fig:limites}
+\end{figure*}
+
+\subsection{Exp.~2: estado no instante do registro (RQ1 e RQ3)}
+A Tabela~\ref{tab:metodos} e a Figura~\ref{fig:metodos} resumem a decisão. Com a faixa de 15~min, o perfil contextual classificou corretamente 97,1\% dos controles como \Normal e sinalizou como \Residual 39,3\% dos incidentes (43,2\% nas intensidades média e alta). Nos acertos de estado, ele empata com os dois baselines na faixa de 15 min (McNemar: $p = 0{,}12$ contra o z-score global; $p = 0{,}75$ contra a semana anterior) e supera o z-score global na faixa de 30 min ($p = 0{,}009$). Essa última diferença deve ser lida com cautela: os métodos operam em pontos distintos da curva de alarmes, e o acerto de estado, com incidentes e controles em proporção aproximadamente igual por construção, equivale à média entre sensibilidade e especificidade. A comparação pareada por taxa de alarmes é a leitura adequada, e nela o perfil contextual não detecta mais que os baselines.
+
+\begin{table*}[t]
+  \caption{Exp.~2: estado no registro por método e faixa anterior ao registro, em \% (IC de Wilson a 95\% entre colchetes). Histórico de 3 meses; 6.077 incidentes e 6.080 controles.}
+  \label{tab:metodos}
+  \small
+  \begin{tabular}{llccc}
+    \toprule
+    Método & Faixa $L$ & Sensibilidade & Sensibilidade (média/alta) & Especificidade \\
+    \midrule
+    \textbf{Perfil contextual (proposto)} & 15 min & \textbf{39,3} [38,1; 40,5] & \textbf{43,2} [41,7; 44,8] & 97,1 [96,6; 97,5] \\
+     & 30 min & 39,0 [37,8; 40,2] & 43,4 [41,9; 45,0] & 97,0 [96,5; 97,4] \\
+     & 60 min & 36,2 [35,0; 37,4] & 41,0 [39,5; 42,6] & 96,8 [96,3; 97,2] \\
+    \midrule
+    z-score global & 15 min & 38,0 [36,8; 39,3] & 40,4 [38,8; 41,9] & 97,7 [97,3; 98,0] \\
+     & 30 min & 37,4 [36,2; 38,6] & 40,4 [38,8; 41,9] & 97,5 [97,1; 97,9] \\
+     & 60 min & 34,4 [33,3; 35,6] & 37,6 [36,1; 39,2] & 98,0 [97,6; 98,3] \\
+    \midrule
+    Semana anterior & 15 min & 39,4 [38,2; 40,6] & 42,4 [40,8; 43,9] & 96,8 [96,4; 97,3] \\
+     & 30 min & 39,3 [38,0; 40,5] & 42,7 [41,1; 44,3] & 97,1 [96,7; 97,5] \\
+     & 60 min & 36,6 [35,4; 37,8] & 40,2 [38,7; 41,8] & 97,2 [96,7; 97,6] \\
+    \bottomrule
+  \end{tabular}
+\end{table*}
+
+\begin{figure*}[t]
+  \centering
+  \includegraphics[width=0.85\textwidth]{figuras/fig_metodos.pdf}
+  \caption{Sensibilidade (intensidades média e alta) e especificidade por método e faixa, com IC de Wilson a 95\%.}
+  \label{fig:metodos}
+\end{figure*}
+
+\paragraph{Ponto de operação.} O limite de cada indicador é o seu percentil 99 no histórico (multiplicador $c=1$), escolhido porque a consulta só é feita quando já existe um incidente aberto e um falso \Residual desvia a atenção do operador. A Figura~\ref{fig:curva} mostra também os pontos com 1\% e 2\% de alarmes no histórico: com 1\%, a especificidade sobe para 99,0\% e a sensibilidade cai para 29,6\%. Nesses pontos mais conservadores, os baselines detectam um pouco mais que o perfil contextual (30,2\% e 30,8\%); no ponto adotado, os três métodos se equivalem.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.85\columnwidth]{figuras/fig_curva_operacao.pdf}
+  \caption{Sensibilidade contra controles marcados como \Residual (faixa de 15~min), para metas de 1\%, 2\% e 5\% de alarmes no histórico.}
+  \label{fig:curva}
+\end{figure}
+
+\paragraph{Por motivo.} A sensibilidade depende muito do motivo (Figura~\ref{fig:sensmotivo}). Erros de sistema generalizados são detectados em 59\% a 88\% dos casos, conforme a intensidade, e erros 5xx de um consumidor em 53\% a 62\%. Erros de negócio têm detecção de 5\% a 34\% (generalizados) e de 13\% a 24\% (um consumidor), porque vários recursos já têm taxas altas e variáveis de 4xx. A latência vai de 4\% ($\times$1,5) a 36\% ($\times$4) e chega a \textbf{61\%} [56; 66] na degradação de 10 vezes.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.9\columnwidth]{figuras/fig_sens_motivo.pdf}
+  \caption{Sensibilidade no registro (faixa de 15~min) por motivo e intensidade.}
+  \label{fig:sensmotivo}
+\end{figure}
+
+\paragraph{Por recurso e por mês.} Por recurso (Tabela~\ref{tab:recursos}), a sensibilidade vai de 6\% (E10, com apenas dois clientes e picos reais de 5xx) a 63\% (E09). Por mês, a sensibilidade foi de 49,8\% em agosto (7 recursos) e 33,2\% em setembro (12 recursos); restrita aos mesmos 7 recursos, setembro teve 45,9\%. A queda de setembro vem, portanto, sobretudo dos recursos que só entram nesse mês, com menos histórico e mais variação.
+
+\paragraph{Tamanho da faixa e atraso do registro (RQ3).} A faixa mais curta é a melhor quando o incidente é registrado logo após o início da degradação (Figura~\ref{fig:atraso}): com atraso de 15~min, a sensibilidade (intensidades média e alta) é de 45\% com a faixa de 15~min, contra 30\% com a de 60~min, que mistura minutos normais e degradados. Com atraso de 60 ou 120~min, a faixa de 60~min fica ligeiramente melhor (47--48\% contra 42\%), por reduzir o ruído. Na média, as faixas de 15 e 30~min são equivalentes (43,2\% e 43,4\%) e superiores à de 60~min (41,0\%).
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.85\columnwidth]{figuras/fig_sens_atraso.pdf}
+  \caption{Sensibilidade (intensidades média e alta) por atraso entre o início da degradação e o registro, para cada tamanho de faixa.}
+  \label{fig:atraso}
+\end{figure}
+
+\subsection{Exp.~3: indicador responsável, início e abrangência (RQ2)}
+Quando o recurso é sinalizado como \Residual, o indicador apontado é o do motivo injetado em 96,5\% dos casos [95,7; 97,2] (Figura~\ref{fig:confusao}): 99,5\% para 5xx generalizado, 97,7\% para 5xx de um consumidor, 93,4\% para latência e 91--92\% para 4xx. A acurácia é menor em E06 (69\%) e E02 (84\%), recursos com muita variação natural em outros indicadores.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.85\columnwidth]{figuras/fig_confusao_indicador.pdf}
+  \caption{Motivo injetado contra indicador apontado (faixa de 15~min, casos detectados).}
+  \label{fig:confusao}
+\end{figure}
+
+A expansão retroativa (Figura~\ref{fig:expansao}) colocou o início real dentro da zona estimada em 91,7\% dos casos detectados [90,5; 92,7] (Tabela~\ref{tab:consulta}): 99\% quando a degradação começou 15 ou 30~min antes do registro, 85\% com 60~min e 83\% com 120~min (Figura~\ref{fig:inicio}). Os erros são quase sempre subestimações: uma faixa intermediária sai \Normal, a busca para cedo e o início é estimado mais perto do registro do que de fato ocorreu.
+
+\begin{figure*}[t]
+  \centering
+  \includegraphics[width=0.85\textwidth]{figuras/fig_expansao_exemplo.pdf}
+  \caption{Expansão retroativa em um cenário de 5xx generalizado iniciado 60~min antes do registro (E12): as três faixas mais recentes são residuais e a de 60--120~min é normal, e o início é estimado entre 30 e 120~min antes.}
+  \label{fig:expansao}
+\end{figure*}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.8\columnwidth]{figuras/fig_inicio.pdf}
+  \caption{Início real dentro da zona estimada, por atraso (IC de Wilson a 95\%).}
+  \label{fig:inicio}
+\end{figure}
+
+\paragraph{Abrangência (complementar).} Entre os erros 4xx e 5xx detectados com o indicador correto, a abrangência foi classificada corretamente em 76,3\% [74,3; 78,1]. Os erros generalizados são reconhecidos como tais em 85--90\% dos casos; os de um consumidor, em 58\% (4xx) e 66\% (5xx).
+
+\begin{table}[t]
+  \caption{Exp.~3: qualidade da consulta nos incidentes detectados (faixa de 15~min, histórico de 3 meses), em \% (IC de Wilson a 95\%).}
+  \label{tab:consulta}
+  \small
+  \begin{tabular}{lcc}
+    \toprule
+    Informação & Casos & Acerto \\
+    \midrule
+    Indicador responsável & 2.389 & 96,5 [95,7; 97,2] \\
+    Início na zona estimada & 2.389 & 91,7 [90,5; 92,7] \\
+    \quad degradação 15 ou 30~min antes & 1.245 & 99,0 \\
+    \quad degradação 60 ou 120~min antes & 1.144 & 83,7 \\
+    Abrangência (4xx e 5xx) & 1.911 & 76,3 [74,3; 78,1] \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\paragraph{Saída para o agente e evento real.} A consulta produz um documento estruturado. A Figura~\ref{fig:json} mostra, resumida, a saída do cenário da Figura~\ref{fig:expansao}.
+
+\begin{figure}[t]
+\begin{Verbatim}[fontsize=\scriptsize,frame=single]
+{"recurso": "E12", "registro_incidente": "2026-08-02 16:52",
+ "contexto": {"tipo_dia": "não útil", "hora": "16h"},
+ "estado": "Residual", "indicador_impactado": "erros 5xx",
+ "evidencias": [{"indicador": "erros 5xx", "observado": "15.7%",
+    "faixa_normal_p5_p95": ["0.0%", "1.7%"], "vezes_o_limite": 1.02}],
+ "inicio_estimado": "entre 30 e 120 min antes do registro",
+ "abrangencia": {"classificacao": "generalizado",
+    "clientes_ativos": 27, "clientes_com_erro": 10},
+ "motivo_estatistico": "O recurso E12 está fora do regime normal
+   esperado para não útil às 16h. Indicador impactado: erros 5xx
+   — 15.7% nos 15 min anteriores ao registro (faixa normal 0.0% a
+   1.7%), 1.02× o limite do recurso. O desvio começou entre 30 e
+   120 min antes do registro. Os erros aparecem em 10 de 27
+   consumidores ativos."}
+\end{Verbatim}
+\caption{Saída da consulta para o agente (resumida).}
+\label{fig:json}
+\end{figure}
+
+Nos dados reais, sem injeção, a consulta para o E02 às 01h45 de 02/09 retornou \Residual por erros 5xx: 4,1\% nos 15~min anteriores (faixa normal de 0 a 1,1\%), em 15 dos 26 consumidores ativos, com início estimado entre 0 e 30~min antes. O E02 tem um regime normal com 5xx elevado \emph{à 0h}; o evento, uma hora depois, está fora dele. É um candidato a incidente real, a confirmar com a operação.
+
+\subsection{Exp.~4: histórico de 3 meses $\times$ 1 mês (RQ4)}
+O histórico mais longo \emph{não} melhorou o resultado (Tabela~\ref{tab:historico}, Figura~\ref{fig:historico}). Com 1 mês, a sensibilidade subiu de 39,3\% para 42,1\% e a especificidade caiu de 97,1\% para 96,3\%; nos acertos de estado, o histórico de 1 mês foi melhor em todas as faixas (McNemar: $p<0{,}001$ em 15, 30 e 60~min). O efeito difere por mês: em agosto, o histórico de 3 meses foi ligeiramente melhor em sensibilidade (49,8\% contra 47,8\%) e especificidade; em setembro, o de 1 mês detectou bem mais (38,8\% contra 33,2\%). Os limites refletem essa diferença: com 3 meses, o limite de 4xx do E05 fica 10 vezes maior, porque o histórico de junho a agosto inclui a taxa elevada de erros de negócio de julho (3,2\%, contra 0,8\% em agosto); já o limite de volume fica, na mediana, 18\% menor.
+
+\begin{table}[t]
+  \caption{Exp.~4: histórico de 3 meses $\times$ 1 mês (faixa de 15~min, em \%; m/a = intensidades média e alta).}
+  \label{tab:historico}
+  \small
+  \begin{tabular}{lcccc}
+    \toprule
+    Histórico & Sensib. & Sensib. m/a & Especif. & Acur. indicador \\
+    \midrule
+    3 meses & 39,3 & 43,2 & 97,1 & 96,5 \\
+    1 mês & 42,1 & 46,7 & 96,3 & 95,7 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\begin{figure*}[t]
+  \centering
+  \includegraphics[width=0.85\textwidth]{figuras/fig_historico.pdf}
+  \caption{Sensibilidade e especificidade por mês de teste e histórico, com IC de Wilson a 95\%.}
+  \label{fig:historico}
+\end{figure*}
+
+\subsection{Critérios de sucesso}
+Quatro dos cinco critérios definidos no entendimento do negócio foram atendidos (Tabela~\ref{tab:criterios}). A sensibilidade ficou bem abaixo da meta.
+
+\begin{table}[t]
+  \caption{Critérios de sucesso definidos antes da modelagem (faixa de 15~min, histórico de 3 meses).}
+  \label{tab:criterios}
+  \small
+  \begin{tabular}{p{0.5\columnwidth}p{0.22\columnwidth}c}
+    \toprule
+    Critério & Resultado & Atendido \\
+    \midrule
+    Controles com saída \Normal $\geq$ 95\% & 97,1\% & sim \\
+    Sensibilidade (média/alta) $\geq$ 70\% & 43,2\% & não \\
+    Acurácia do indicador $\geq$ 90\% & 96,5\% & sim \\
+    Início real na zona estimada $\geq$ 70\% & 91,7\% & sim \\
+    Sem perda significativa para os baselines & sem perda & sim \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+%% =====================================================================
+\section{Discussão}\label{sec:discussao}
+
+\paragraph{RQ1: regimes e estado no registro.} Os AALs agregados mostram regimes claros e ligados ao contexto em todos os recursos, sobretudo à hora: lotes, horário comercial, madrugada e até regimes normais com erros elevados em horários específicos. O perfil contextual decide o estado de cada recurso no momento do incidente com alta especificidade (97,1\%). Na faixa principal, porém, ele empata com o z-score global e com a semana anterior; o ganho de detecção do contexto é reduzido e só aparece na faixa de 30~min. Isso não torna o contexto inútil, sua contribuição mais clara é a \emph{explicação}, com a definição da faixa normal do contexto, o regime esperado e o limite de cada indicador. O que permite dizer ao operador ``4,1\% de 5xx à 1h, quando o normal é até 1,1\%''. Para o operador, um resultado \Residual é informação forte, raramente aparece sem motivo e vem com o indicador certo, um resultado \Normal indica que o recurso dificilmente é o problema, mas não descarta degradações sutis.
+
+\paragraph{O limite por indicador.} A principal decisão de modelagem foi normalizar cada indicador pela sua própria cauda no recurso. Sem isso, os indicadores com picos reais frequentes como nos erros negociais dos recursos E04, E05 e E07, o limiar definido pode esconder desvios de latência e de erros de sistema. Em AALs reais, os indicadores não têm a mesma variabilidade, e um único limiar global sobre todos eles tende a englobar os mais ruidosos.
+
+\paragraph{RQ2: indicador e início.} O ponto mais forte do método é a qualidade da informação quando ela é emitida: o indicador responsável é apontado corretamente em 96,5\% dos casos, e o início é localizado na zona certa em 91,7\%. A expansão retroativa é simples de explicar, olhar para trás até encontrar um período normal, e dá ao operador uma resposta útil. 
+
+\paragraph{RQ3: tamanho da faixa.} A faixa de 15~min é a melhor escolha como decisão principal, porque o incidente costuma ser aberto pouco depois do início da degradação. Faixas maiores só compensam quando a degradação já dura uma hora ou mais. Na prática, a faixa curta decide o estado e a expansão retroativa dá o horizonte.
+
+\paragraph{RQ4: quanto histórico.} Mais histórico não significou um perfil melhor. As APIs mudam de patamar ao longo dos meses, volume crescendo, taxas de erro de negócio mudando, e um histórico de três meses inclui comportamentos que já não valem, o que alarga os limites. O histórico de 1 mês ganhou sobretudo em setembro, quando a mudança foi maior. Para a implantação, isso indica o retreino frequente com o histórico recente em vez de acumular meses.
+
+\paragraph{Latência e recursos pouco sensíveis.} Com a degradação de 10 vezes, a latência é detectada em 61\% dos casos, contra 36\% com 4 vezes. O p95 das médias por minuto tem caudas pesadas mesmo em dias normais, passam de 10 vezes a mediana do contexto, o que obriga limites altos; um percentil por requisição, se disponível no gateway, é o caminho natural de melhoria. Recursos com picos reais frequentes de um indicador, recebem limites altos para ele e só desvios grandes aparecem, como é o caso de recursos com alto número de erros negociais. Nesses casos, o próprio limite é uma informação útil, diz ao operador que aquele indicador já é instável para o recurso.
+
+%% =====================================================================
+\section{Ameaças à validade}\label{sec:ameacas}
+
+\paragraph{Falhas sintéticas.} O desempenho mede a capacidade de detectar \emph{os motivos injetados}, e não falhas reais. As intensidades variadas, os quatro atrasos, os dois meses e o grande número de cenários reduzem, mas não eliminam, esse viés. A acurácia do indicador, do início e da abrangência é medida apenas sobre incidentes detectados, que tendem a ser os mais fortes.
+
+\paragraph{Parâmetros do método.} O ponto de operação (limite no percentil 99, $c=1$) e a intensidade de latência $\times$10 foram fixados sem otimização nos cenários de teste. A intensidade $\times$10 é justificada pela distribuição do histórico, e as intensidades menores são relatadas. No k-means, os indicadores foram limitados aos percentis 1 e 99 para que picos isolados não formassem grupos triviais; como o k-means é descritivo, isso não afeta as métricas de decisão. O histórico principal (3 meses) foi fixado antes de observar os resultados, e o resultado desfavorável a ele é relatado.
+
+\paragraph{Controles e anomalias reais.} As consultas de controle usam dados reais sem injeção, que podem conter anomalias reais (como a do E02), contadas como falso \Residual. A especificidade é, portanto, uma estimativa conservadora.
+
+\paragraph{Latência aproximada.} O p95 é calculado sobre as médias por minuto e por cliente, e não sobre requisições; a cauda real tende a ser maior. Uma latência 10 vezes maior poderia, na prática, esbarrar no \emph{timeout} do gateway e virar erro 504, o que a injeção não simula.
+
+\paragraph{Generalização.} Os resultados vêm de uma organização e de 12 recursos. A base não pode ser compartilhada; o código dos notebooks é independente dos dados.
+
+%% =====================================================================
+\section{Considerações finais}\label{sec:conclusao}
+
+Este trabalho mostrou que Access Logs agregados por minuto, sem \emph{traces} nem logs de aplicação, permitem caracterizar os regimes normais de cada recurso de API e informar, no instante em que um incidente é aberto, se o recurso está em regime normal ou residual, qual indicador foi impactado (erros de negócio, erros de sistema ou latência) e desde quando. O método usa técnicas simples, como mediana, MAD, percentis, validação cruzada e uma busca retroativa, não exige rótulos e produz uma explicação do contexto que um sitema agentico ou operador pode usar diretamente.
+
+Em dois meses de teste, a informação foi confiável quando emitida: 97,1\% de especificidade, 96,5\% de acerto no indicador e 91,7\% de acerto na zona de início. A sensibilidade ainda é limitada, por volta de 40\%, foi relativamente alta para erros de sistema, moderada para degradações grandes de latência e baixa para erros de negócio em recursos com muitos 4xx naturais. Mostrou também que a expansão retroativa completa a informação com o início do desvio, útil também para o contexto do incidente. O histórico recente de 1 mês mostrou-se melhor que o longo de 3 meses, o que recomenda retreino frequente com menos volume de dados.
+
+Como trabalhos futuros, destacam-se: (i) validar o método com incidentes reais, e com a avaliação de operadores; (ii) melhorar a sensibilidade à latência com percentis por requisição; (iii) explorar outras técnicas de mineração de dados para melhorar a sensibilidade; e (iv) integrar a consulta como ferramenta de um agente de apoio a incidentes.
+
+\bibliographystyle{ACM-Reference-Format}
+\bibliography{referencias}
+
+\end{document}

@@ -1,0 +1,24 @@
+DADOS/
+
+# Saídas dos notebooks (regeneradas executando 01–07 de cada versão a partir de DADOS/):
+# parquet, pkl, csv, json e figuras intermediárias. 01_codigos.json mapeia os recursos e não deve ser publicado.
+v*/resultados/
+
+# PNGs gerados junto com as figuras; os artigos usam só os PDFs
+v*/artigo/figuras*/*.png
+
+# Intermediários do LaTeX
+*.aux
+*.bbl
+*.blg
+*.fdb_latexmk
+*.fls
+*.log
+*.out
+*.synctex.gz
+*.toc
+*.xdv
+
+# Python / Jupyter
+__pycache__/
+.ipynb_checkpoints/

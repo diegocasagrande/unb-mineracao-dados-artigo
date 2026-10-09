@@ -1,0 +1,6 @@
+IC de Wilson 
+MAD de volume
+Limite de cada indicador por recurso (z)
+Avaliação Wilson, McNemar
+dos testes de Kruskal-Wallis 
+2 a 8 no k-means
